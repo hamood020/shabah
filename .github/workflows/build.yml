@@ -7,18 +7,31 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Linux runners are always available; macOS runners can queue for a long time.
+    runs-on: ubuntu-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Install dependencies
         run: |
-          brew install ldid make
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential fakeroot rsync curl perl zip git libxml2 xz-utils
+          sudo curl -fsSL -o /usr/local/bin/ldid https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64
+          sudo chmod +x /usr/local/bin/ldid
+
+      - name: Install Theos, iOS toolchain and SDK
+        run: |
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/toolchain"
+          curl -fsSL https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz | tar -xJ -C "$THEOS/toolchain"
+          git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+          cp -r /tmp/sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          ls "$THEOS/toolchain" "$THEOS/sdks"
 
       - name: Build
-        run: gmake -j"$(sysctl -n hw.ncpu)" FINALPACKAGE=1
+        run: make -j"$(nproc)" FINALPACKAGE=1 messages=yes
 
       - name: Collect dylib
         run: |
