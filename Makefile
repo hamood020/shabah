@@ -7,7 +7,7 @@ LIBRARY_NAME = Shabah
 
 Shabah_FILES = $(wildcard Source/*.m)
 Shabah_CFLAGS = -fobjc-arc -ISource -Wno-deprecated-declarations -Wno-error
-Shabah_FRAMEWORKS = Foundation UIKit CoreLocation MapKit QuartzCore
+Shabah_FRAMEWORKS = Foundation UIKit CoreLocation MapKit QuartzCore AVFoundation UserNotifications UniformTypeIdentifiers
 # The dylib is injected into an app bundle and loaded from its Frameworks folder.
 Shabah_INSTALL_PATH = @executable_path/Frameworks
 

@@ -5,6 +5,7 @@
 #import "SHJoystickView.h"
 #import "SHTheme.h"
 #import <objc/runtime.h>
+#import <AVFoundation/AVFoundation.h>
 
 /// Window that only catches touches on its own controls; everything else
 /// falls through to the host app.
@@ -19,8 +20,57 @@
 }
 @end
 
+/// Watches the system volume: three volume-button presses within 1.5 s
+/// show / hide the floating button (handy when it was hidden by mistake).
+@interface SHVolumeWatcher : NSObject
+@property (nonatomic, copy) void (^onTriplePress)(void);
+- (void)setEnabled:(BOOL)enabled;
+@end
+
+@implementation SHVolumeWatcher {
+    BOOL _observing;
+    NSMutableArray<NSDate *> *_presses;
+}
+
+- (void)setEnabled:(BOOL)enabled {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    if (enabled && !_observing) {
+        // Volume changes are only reported for an active session. If the host app never
+        // configured audio, use the mixing "ambient" category so music keeps playing.
+        if ([session.category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+            [session setCategory:AVAudioSessionCategoryAmbient withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+        }
+        [session setActive:YES error:nil];
+        [session addObserver:self forKeyPath:@"outputVolume" options:NSKeyValueObservingOptionNew context:NULL];
+        _observing = YES;
+        _presses = [NSMutableArray array];
+    } else if (!enabled && _observing) {
+        [session removeObserver:self forKeyPath:@"outputVolume"];
+        _observing = NO;
+    }
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSDate *now = [NSDate date];
+        [self->_presses addObject:now];
+        [self->_presses filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDate *d, NSDictionary *b) {
+            return [now timeIntervalSinceDate:d] < 1.5;
+        }]];
+        if (self->_presses.count >= 3) {
+            [self->_presses removeAllObjects];
+            if (self.onTriplePress) self.onTriplePress();
+        }
+    });
+}
+
+@end
+
 static SHPassthroughWindow *gWindow;
 static UIButton *gButton;
+static UIButton *gPill;
+static NSTimer *gPillTimer;
+static SHVolumeWatcher *gVolume;
 static SHJoystickView *gJoystick;
 static __weak UIWindow *gPreviousKeyWindow;
 static BOOL gUserHidButton;
@@ -47,6 +97,9 @@ static UIWindowScene *SHActiveWindowScene(void) {
     void (^refreshHandler)(NSNotification *) = ^(NSNotification *note) { [self refresh]; };
     [nc addObserverForName:SHStateChangedNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:refreshHandler];
     [nc addObserverForName:SHPlacesChangedNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:refreshHandler];
+    [nc addObserverForName:SHEngineUpdateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        [self refreshPill];
+    }];
 }
 
 + (void)installIfNeeded {
@@ -79,6 +132,30 @@ static UIWindowScene *SHActiveWindowScene(void) {
     gJoystick = [[SHJoystickView alloc] initWithFrame:CGRectMake(24, CGRectGetMaxY(bounds) - [SHJoystickView preferredSize] - 120, 0, 0)];
     [root.view addSubview:gJoystick];
 
+    // Status pill: tap toggles spoofing, long-press opens the map, drag to move.
+    gPill = [UIButton buttonWithType:UIButtonTypeCustom];
+    gPill.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    gPill.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    gPill.layer.cornerRadius = 14;
+    gPill.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.82];
+    [gPill setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [SHTheme addFloatingShadowToView:gPill];
+    [gPill addTarget:self action:@selector(pillTapped) forControlEvents:UIControlEventTouchUpInside];
+    [gPill addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
+    UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(pillHeld:)];
+    [gPill addGestureRecognizer:hold];
+    gPill.center = CGPointMake(CGRectGetMidX(bounds), MAX(60, gWindow.safeAreaInsets.top + 22));
+    [root.view addSubview:gPill];
+    gPillTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { [SHOverlay refreshPill]; }];
+    gPillTimer.tolerance = 0.3;
+
+    gVolume = [SHVolumeWatcher new];
+    gVolume.onTriplePress = ^{
+        gUserHidButton = !gUserHidButton;
+        [SHOverlay refresh];
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+    };
+
     [self refresh];
     SH_LOG(@"overlay installed in %@", NSBundle.mainBundle.bundleIdentifier);
 }
@@ -109,8 +186,73 @@ static UIWindowScene *SHActiveWindowScene(void) {
     gButton.backgroundColor = on ? [SHTheme accent] : [UIColor colorWithWhite:0.12 alpha:0.88];
     gButton.layer.borderColor = (on ? [SHTheme success] : UIColor.clearColor).CGColor;
     gButton.hidden = gUserHidButton || gPickerVisible;
+    gButton.alpha = store.buttonOpacity;
     gButton.menu = [self buildMenu];
+
+    CGFloat size = store.buttonSize;
+    if (fabs(CGRectGetWidth(gButton.bounds) - size) > 0.5) {
+        CGPoint center = gButton.center;
+        gButton.bounds = CGRectMake(0, 0, size, size);
+        gButton.center = center;
+        gButton.layer.cornerRadius = size / 2;
+        [gButton setImage:[SHTheme ghostImageWithSize:round(size * 0.58) color:UIColor.whiteColor] forState:UIControlStateNormal];
+    }
+
     gJoystick.hidden = !store.joystickEnabled || gPickerVisible || gUserHidButton;
+    [gVolume setEnabled:store.volumeGestureEnabled];
+    [self refreshPill];
+}
+
++ (void)refreshPill {
+    if (!gPill) return;
+    SHPersistence *store = [SHPersistence shared];
+    BOOL on = store.isSpoofing;
+    gPill.hidden = !store.statusPillEnabled || gPickerVisible || gUserHidButton || !on;
+    if (gPill.hidden) return;
+
+    SHMovementEngine *engine = [SHMovementEngine shared];
+    NSString *text = SHText(@"status_on");
+    if (engine.mode == SHEngineModeRoute) {
+        text = [NSString stringWithFormat:@"%@ · %d%%", engine.isPaused ? SHText(@"status_paused") : SHText(@"status_route"),
+                (int)lround(engine.progress * 100)];
+    } else if (engine.mode == SHEngineModeJoystick) {
+        text = SHText(@"status_joystick");
+    }
+    NSDate *expiry = store.expiryDate;
+    if (expiry && expiry.timeIntervalSinceNow > 0) {
+        NSInteger left = (NSInteger)expiry.timeIntervalSinceNow;
+        NSString *clock = left >= 3600 ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)(left / 3600), (long)(left % 3600 / 60), (long)(left % 60)]
+                                       : [NSString stringWithFormat:@"%02ld:%02ld", (long)(left / 60), (long)(left % 60)];
+        text = [NSString stringWithFormat:@"%@ · %@", text, clock];
+    }
+    NSString *title = [NSString stringWithFormat:@"● %@", text];
+    if (![[gPill titleForState:UIControlStateNormal] isEqualToString:title]) {
+        CGPoint center = gPill.center;
+        NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:title attributes:@{
+            NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold],
+            NSForegroundColorAttributeName: UIColor.whiteColor,
+        }];
+        [attributed addAttribute:NSForegroundColorAttributeName value:[SHTheme success] range:NSMakeRange(0, 1)];
+        [gPill setTitle:title forState:UIControlStateNormal];
+        [gPill setAttributedTitle:attributed forState:UIControlStateNormal];
+        [gPill sizeToFit];
+        gPill.center = center;
+    }
+}
+
++ (void)pillTapped {
+    SHPersistence *store = [SHPersistence shared];
+    if (store.isSpoofing) {
+        [[SHMovementEngine shared] stop];
+        [store stopSpoofing];
+    } else {
+        [store resumeLast];
+    }
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+}
+
++ (void)pillHeld:(UILongPressGestureRecognizer *)hold {
+    if (hold.state == UIGestureRecognizerStateBegan) [self presentPicker];
 }
 
 + (UIMenu *)buildMenu {
@@ -175,7 +317,7 @@ static UIWindowScene *SHActiveWindowScene(void) {
     [pan setTranslation:CGPointZero inView:container];
 
     // Snap to the nearest side when released, like a chat head.
-    if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+    if (view == gButton && (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled)) {
         CGFloat left = r + safe.left + 8;
         CGFloat right = CGRectGetWidth(container.bounds) - r - safe.right - 8;
         CGFloat x = c.x < CGRectGetMidX(container.bounds) ? left : right;

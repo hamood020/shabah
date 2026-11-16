@@ -29,6 +29,25 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL realisticMotion;
 @property (nonatomic) BOOL joystickEnabled;       // joystick shown over the host app
 
+#pragma mark Overlay and appearance (1.1)
+@property (nonatomic) NSInteger themeIndex;       // accent color, see SHTheme
+@property (nonatomic) double buttonSize;          // floating button diameter, 44...76
+@property (nonatomic) double buttonOpacity;       // 0.35...1
+@property (nonatomic) BOOL statusPillEnabled;     // small status label over the app
+@property (nonatomic) BOOL volumeGestureEnabled;  // 3 quick volume presses show the hidden button
+@property (nonatomic) BOOL showRealLocation;      // grey pin for the real GPS position on the map
+@property (nonatomic) BOOL expiryNotifications;   // local notification before / at auto stop
+
+#pragma mark Weekly schedule (1.1)
+@property (nonatomic) BOOL scheduleEnabled;
+@property (nonatomic, copy) NSArray<NSNumber *> *scheduleDays;   // NSCalendar weekdays, 1 = Sunday
+@property (nonatomic) NSInteger scheduleStartMinutes;             // minutes after midnight
+@property (nonatomic) NSInteger scheduleEndMinutes;
+@property (nonatomic, copy, nullable) NSDictionary *scheduleLocation;   // @{ name, lat, lon }
+
+#pragma mark Real GPS (in memory only)
+@property (atomic, strong, nullable) CLLocation *lastRealLocation;
+
 #pragma mark Spoofing
 - (void)startSpoofingAt:(CLLocationCoordinate2D)coordinate;
 /// Called by the movement engine on every tick (course in degrees, speed in m/s).
@@ -48,6 +67,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)removeBookmarkAtIndex:(NSUInteger)index;
 - (NSArray<NSDictionary *> *)recents;
 - (void)recordRecent:(CLLocationCoordinate2D)coordinate name:(nullable NSString *)name;
+/// Each route is @{ name, points: @[ @[lat, lon], ... ], date }.
+- (NSArray<NSDictionary *> *)savedRoutes;
+- (void)saveRouteNamed:(nullable NSString *)name points:(NSArray<NSValue *> *)points;
+- (void)removeRouteAtIndex:(NSUInteger)index;
 - (NSString *)exportPlacesJSON;
 /// Returns the number of bookmarks imported, or -1 if the text is not valid.
 - (NSInteger)importPlacesJSON:(NSString *)json;

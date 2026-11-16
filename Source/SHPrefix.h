@@ -4,7 +4,7 @@
 #import <MapKit/MapKit.h>
 #import <math.h>
 
-#define SH_VERSION @"1.0.0"
+#define SH_VERSION @"1.1.0"
 #define SH_REPO @"hamood020/shabah"
 #define SH_LOG(fmt, ...) SHLog(fmt, ##__VA_ARGS__)
 

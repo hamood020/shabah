@@ -22,6 +22,19 @@ static NSString *const kRealistic = @"SHRealistic";
 static NSString *const kJoystick  = @"SHJoystick";
 static NSString *const kBookmarks = @"SHBookmarks";
 static NSString *const kRecents   = @"SHRecents";
+static NSString *const kRoutes    = @"SHSavedRoutes";
+static NSString *const kTheme     = @"SHTheme";
+static NSString *const kBtnSize   = @"SHButtonSize";
+static NSString *const kBtnAlpha  = @"SHButtonOpacity";
+static NSString *const kPill      = @"SHStatusPill";
+static NSString *const kVolume    = @"SHVolumeGesture";
+static NSString *const kRealPin   = @"SHShowRealLocation";
+static NSString *const kNotify    = @"SHExpiryNotifications";
+static NSString *const kSchedOn   = @"SHScheduleEnabled";
+static NSString *const kSchedDays = @"SHScheduleDays";
+static NSString *const kSchedFrom = @"SHScheduleStart";
+static NSString *const kSchedTo   = @"SHScheduleEnd";
+static NSString *const kSchedLoc  = @"SHScheduleLocation";
 
 static const double kPresetSpeeds[] = { 5.0, 15.0, 60.0 };
 static const NSUInteger kMaxRecents = 15;
@@ -74,6 +87,20 @@ static void SHPostOnMain(NSString *name) {
         _loopRoute = [_d boolForKey:kLoop];
         _realisticMotion = [_d objectForKey:kRealistic] ? [_d boolForKey:kRealistic] : YES;
         _joystickEnabled = [_d boolForKey:kJoystick];
+
+        _themeIndex = [_d integerForKey:kTheme];
+        _buttonSize = [_d objectForKey:kBtnSize] ? [_d doubleForKey:kBtnSize] : 56;
+        _buttonOpacity = [_d objectForKey:kBtnAlpha] ? [_d doubleForKey:kBtnAlpha] : 1.0;
+        _statusPillEnabled = [_d objectForKey:kPill] ? [_d boolForKey:kPill] : YES;
+        _volumeGestureEnabled = [_d boolForKey:kVolume];
+        _showRealLocation = [_d objectForKey:kRealPin] ? [_d boolForKey:kRealPin] : YES;
+        _expiryNotifications = [_d boolForKey:kNotify];
+
+        _scheduleEnabled = [_d boolForKey:kSchedOn];
+        _scheduleDays = [_d arrayForKey:kSchedDays] ?: @[@1, @2, @3, @4, @5];   // Sunday to Thursday
+        _scheduleStartMinutes = [_d objectForKey:kSchedFrom] ? [_d integerForKey:kSchedFrom] : 7 * 60;
+        _scheduleEndMinutes = [_d objectForKey:kSchedTo] ? [_d integerForKey:kSchedTo] : 15 * 60;
+        _scheduleLocation = [_d dictionaryForKey:kSchedLoc];
 
         _course = -1;
         _speed = -1;
@@ -246,6 +273,26 @@ static void SHPostOnMain(NSString *name) {
     SHPostOnMain(SHStateChangedNotification);
 }
 
+// Settings that change what the overlay shows post a state change so it redraws.
+- (void)setThemeIndex:(NSInteger)v        { _themeIndex = MAX(0, v); [_d setInteger:_themeIndex forKey:kTheme]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setButtonSize:(double)v           { _buttonSize = MAX(44, MIN(76, v)); [_d setDouble:_buttonSize forKey:kBtnSize]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setButtonOpacity:(double)v        { _buttonOpacity = MAX(0.35, MIN(1, v)); [_d setDouble:_buttonOpacity forKey:kBtnAlpha]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setStatusPillEnabled:(BOOL)v      { _statusPillEnabled = v; [_d setBool:v forKey:kPill]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setVolumeGestureEnabled:(BOOL)v   { _volumeGestureEnabled = v; [_d setBool:v forKey:kVolume]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setShowRealLocation:(BOOL)v       { _showRealLocation = v; [_d setBool:v forKey:kRealPin]; }
+- (void)setExpiryNotifications:(BOOL)v    { _expiryNotifications = v; [_d setBool:v forKey:kNotify]; SHPostOnMain(SHStateChangedNotification); }
+
+- (void)setScheduleEnabled:(BOOL)v        { _scheduleEnabled = v; [_d setBool:v forKey:kSchedOn]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setScheduleDays:(NSArray<NSNumber *> *)v { _scheduleDays = [v copy] ?: @[]; [_d setObject:_scheduleDays forKey:kSchedDays]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setScheduleStartMinutes:(NSInteger)v { _scheduleStartMinutes = MAX(0, MIN(1439, v)); [_d setInteger:_scheduleStartMinutes forKey:kSchedFrom]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setScheduleEndMinutes:(NSInteger)v   { _scheduleEndMinutes = MAX(0, MIN(1439, v)); [_d setInteger:_scheduleEndMinutes forKey:kSchedTo]; SHPostOnMain(SHStateChangedNotification); }
+- (void)setScheduleLocation:(NSDictionary *)v {
+    _scheduleLocation = [v copy];
+    if (v) [_d setObject:@{ @"name": v[@"name"] ?: @"", @"lat": v[@"lat"] ?: @0, @"lon": v[@"lon"] ?: @0 } forKey:kSchedLoc];
+    else [_d removeObjectForKey:kSchedLoc];
+    SHPostOnMain(SHStateChangedNotification);
+}
+
 #pragma mark - Places
 
 static NSDictionary *SHPlace(NSString *name, CLLocationCoordinate2D c) {
@@ -316,12 +363,43 @@ static NSString *SHPlaceName(NSString *name, CLLocationCoordinate2D c) {
     SHPostOnMain(SHPlacesChangedNotification);
 }
 
+- (NSArray<NSDictionary *> *)savedRoutes {
+    return [_d arrayForKey:kRoutes] ?: @[];
+}
+
+- (void)saveRouteNamed:(NSString *)name points:(NSArray<NSValue *> *)points {
+    if (points.count == 0) return;
+    NSMutableArray *pairs = [NSMutableArray arrayWithCapacity:points.count];
+    for (NSValue *v in points) {
+        CLLocationCoordinate2D c = SHUnbox(v);
+        [pairs addObject:@[@(c.latitude), @(c.longitude)]];
+    }
+    NSString *trimmed = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!trimmed.length) trimmed = [NSString stringWithFormat:@"Route %lu", (unsigned long)[self savedRoutes].count + 1];
+    NSMutableArray *list = [[self savedRoutes] mutableCopy];
+    [list insertObject:@{ @"name": trimmed, @"points": pairs, @"date": [NSDate date] } atIndex:0];
+    [_d setObject:list forKey:kRoutes];
+    SHPostOnMain(SHPlacesChangedNotification);
+}
+
+- (void)removeRouteAtIndex:(NSUInteger)index {
+    NSMutableArray *list = [[self savedRoutes] mutableCopy];
+    if (index >= list.count) return;
+    [list removeObjectAtIndex:index];
+    [_d setObject:list forKey:kRoutes];
+    SHPostOnMain(SHPlacesChangedNotification);
+}
+
 - (NSString *)exportPlacesJSON {
     NSMutableArray *out = [NSMutableArray array];
     for (NSDictionary *item in [self bookmarks]) {
         [out addObject:@{ @"name": item[@"name"] ?: @"", @"lat": item[@"lat"] ?: @0, @"lon": item[@"lon"] ?: @0 }];
     }
-    NSDictionary *root = @{ @"app": @"shabah", @"version": SH_VERSION, @"bookmarks": out };
+    NSMutableArray *routes = [NSMutableArray array];
+    for (NSDictionary *route in [self savedRoutes]) {
+        [routes addObject:@{ @"name": route[@"name"] ?: @"", @"points": route[@"points"] ?: @[] }];
+    }
+    NSDictionary *root = @{ @"app": @"shabah", @"version": SH_VERSION, @"bookmarks": out, @"routes": routes };
     NSData *data = [NSJSONSerialization dataWithJSONObject:root options:NSJSONWritingPrettyPrinted error:nil];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
 }
@@ -331,10 +409,27 @@ static NSString *SHPlaceName(NSString *name, CLLocationCoordinate2D c) {
     if (!data) return -1;
     id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     NSArray *items = [root isKindOfClass:NSDictionary.class] ? root[@"bookmarks"] : root;
-    if (![items isKindOfClass:NSArray.class]) return -1;
+    if (![items isKindOfClass:NSArray.class]) items = @[];
+
+    NSInteger added = 0;
+    NSArray *routes = [root isKindOfClass:NSDictionary.class] ? root[@"routes"] : nil;
+    if ([routes isKindOfClass:NSArray.class]) {
+        for (id route in [[routes reverseObjectEnumerator] allObjects]) {
+            if (![route isKindOfClass:NSDictionary.class] || ![route[@"points"] isKindOfClass:NSArray.class]) continue;
+            NSMutableArray<NSValue *> *points = [NSMutableArray array];
+            for (id pair in route[@"points"]) {
+                if (![pair isKindOfClass:NSArray.class] || [pair count] < 2) continue;
+                CLLocationCoordinate2D c = CLLocationCoordinate2DMake([pair[0] doubleValue], [pair[1] doubleValue]);
+                if (CLLocationCoordinate2DIsValid(c)) [points addObject:SHBox(c)];
+            }
+            if (points.count) {
+                [self saveRouteNamed:[route[@"name"] isKindOfClass:NSString.class] ? route[@"name"] : nil points:points];
+                added++;
+            }
+        }
+    }
 
     NSMutableArray *list = [[self bookmarks] mutableCopy];
-    NSInteger added = 0;
     for (id item in items) {
         if (![item isKindOfClass:NSDictionary.class]) continue;
         id lat = item[@"lat"], lon = item[@"lon"];

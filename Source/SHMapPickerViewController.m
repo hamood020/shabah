@@ -8,6 +8,8 @@
 #import "SHLinkParser.h"
 #import "SHSettingsViewController.h"
 #import "SHUpdateChecker.h"
+#import "SHScheduleViewController.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 typedef NS_ENUM(NSInteger, SHTab) {
     SHTabLocation = 0,
@@ -44,7 +46,15 @@ static NSString *SHStyleTitle(NSInteger style) {
 @implementation SHWaypointAnnotation
 @end
 
-@interface SHMapPickerViewController () <MKMapViewDelegate, UITextFieldDelegate, MKLocalSearchCompleterDelegate, UITableViewDataSource, UITableViewDelegate>
+/// Grey pin showing where the device really is while spoofing.
+@interface SHRealLocationAnnotation : MKPointAnnotation
+@end
+@implementation SHRealLocationAnnotation
+@end
+
+@interface SHMapPickerViewController () <MKMapViewDelegate, UITextFieldDelegate, MKLocalSearchCompleterDelegate, UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate>
+@property (nonatomic, strong) SHRealLocationAnnotation *realPin;
+@property (nonatomic, strong) NSTimer *realPinTimer;
 
 // Map and search
 @property (nonatomic, strong) MKMapView *mapView;
@@ -119,6 +129,7 @@ static NSString *SHStyleTitle(NSInteger style) {
 
 - (void)dealloc {
     for (id o in _observers) [[NSNotificationCenter defaultCenter] removeObserver:o];
+    [_realPinTimer invalidate];
 }
 
 - (void)viewDidLoad {
@@ -149,6 +160,11 @@ static NSString *SHStyleTitle(NSInteger style) {
         usingBlock:^(NSNotification *n) { [weakSelf.placesTable reloadData]; }]];
     [self.observers addObject:[nc addObserverForName:UIKeyboardWillChangeFrameNotification object:nil queue:NSOperationQueue.mainQueue
         usingBlock:^(NSNotification *n) { [weakSelf keyboardChanged:n]; }]];
+
+    self.realPinTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *t) {
+        if (!weakSelf) { [t invalidate]; return; }
+        [weakSelf refreshRealLocationPin];
+    }];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -213,6 +229,7 @@ static NSString *SHStyleTitle(NSInteger style) {
     MKCoordinateRegion region = self.mapView.region;
     [self.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     self.pin = nil;
+    self.realPin = nil;
     [self.waypointAnnotations removeAllObjects];
     [self buildUI];
     [self.mapView setRegion:region animated:NO];
@@ -370,7 +387,11 @@ static NSString *SHStyleTitle(NSInteger style) {
     for (UIButton *chip in @[routeChip, joyChip, placesChip]) {
         [chip addTarget:self action:@selector(tabChipTapped:) forControlEvents:UIControlEventTouchUpInside];
     }
-    UIStackView *chips = [[UIStackView alloc] initWithArrangedSubviews:@[self.toggleChip, routeChip, joyChip, placesChip]];
+    UIButton *scheduleChip = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"schedule") symbol:@"calendar.badge.clock"];
+    [scheduleChip addTarget:self action:@selector(openSchedule) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *copyChip = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"copy") symbol:@"doc.on.doc"];
+    [copyChip addTarget:self action:@selector(copyCoordinatesTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *chips = [[UIStackView alloc] initWithArrangedSubviews:@[self.toggleChip, routeChip, joyChip, placesChip, scheduleChip, copyChip]];
     chips.spacing = 8;
     chips.translatesAutoresizingMaskIntoConstraints = NO;
     UIScrollView *chipScroll = [UIScrollView new];
@@ -537,7 +558,10 @@ static NSString *SHStyleTitle(NSInteger style) {
     [undo addTarget:self action:@selector(undoWaypoint) forControlEvents:UIControlEventTouchUpInside];
     UIButton *clear = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"clear") symbol:@"trash"];
     [clear addTarget:self action:@selector(clearWaypoints) forControlEvents:UIControlEventTouchUpInside];
-    UIStackView *stopsRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.waypointsLabel, undo, clear]];
+    UIButton *saveRoute = [SHTheme buttonWithStyle:SHButtonStyleChip title:nil symbol:@"square.and.arrow.down.on.square"];
+    saveRoute.accessibilityLabel = SHText(@"save_route");
+    [saveRoute addTarget:self action:@selector(saveRouteTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *stopsRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.waypointsLabel, saveRoute, undo, clear]];
     stopsRow.spacing = 8;
     stopsRow.alignment = UIStackViewAlignmentCenter;
 
@@ -585,9 +609,22 @@ static NSString *SHStyleTitle(NSInteger style) {
 
 - (UIView *)buildPlacesTab {
     UIButton *export = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"export") symbol:@"square.and.arrow.up"];
-    [export addTarget:self action:@selector(exportPlaces) forControlEvents:UIControlEventTouchUpInside];
+    __weak typeof(self) weakSelf = self;
+    export.menu = [UIMenu menuWithChildren:@[
+        [UIAction actionWithTitle:SHText(@"via_clipboard") image:[UIImage systemImageNamed:@"doc.on.clipboard"] identifier:nil
+            handler:^(UIAction *a) { [weakSelf exportPlaces]; }],
+        [UIAction actionWithTitle:SHText(@"via_file") image:[UIImage systemImageNamed:@"doc"] identifier:nil
+            handler:^(UIAction *a) { [weakSelf shareExportFile]; }],
+    ]];
+    export.showsMenuAsPrimaryAction = YES;
     UIButton *import = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"import") symbol:@"square.and.arrow.down"];
-    [import addTarget:self action:@selector(importPlaces) forControlEvents:UIControlEventTouchUpInside];
+    import.menu = [UIMenu menuWithChildren:@[
+        [UIAction actionWithTitle:SHText(@"via_clipboard") image:[UIImage systemImageNamed:@"doc.on.clipboard"] identifier:nil
+            handler:^(UIAction *a) { [weakSelf importPlaces]; }],
+        [UIAction actionWithTitle:SHText(@"via_file") image:[UIImage systemImageNamed:@"doc"] identifier:nil
+            handler:^(UIAction *a) { [weakSelf pickImportFile]; }],
+    ]];
+    import.showsMenuAsPrimaryAction = YES;
     self.placesEditButton = [SHTheme buttonWithStyle:SHButtonStyleChip title:SHText(@"edit") symbol:@"arrow.up.arrow.down"];
     [self.placesEditButton addTarget:self action:@selector(togglePlacesEditing) forControlEvents:UIControlEventTouchUpInside];
     UIView *spacer = [UIView new];
@@ -1178,8 +1215,100 @@ static NSString *SHStyleTitle(NSInteger style) {
     else [self showMessage:[NSString stringWithFormat:SHText(@"imported_fmt"), (long)count]];
 }
 
+// Places table sections: 0 bookmarks, 1 recents, 2 saved routes.
 - (NSArray<NSDictionary *> *)placesInSection:(NSInteger)section {
-    return section == 0 ? [SHPersistence shared].bookmarks : [SHPersistence shared].recents;
+    switch (section) {
+        case 0: return [SHPersistence shared].bookmarks;
+        case 1: return [SHPersistence shared].recents;
+        default: return [SHPersistence shared].savedRoutes;
+    }
+}
+
+/// Puts a saved route's stops on the map and opens the Route tab.
+- (void)loadRoute:(NSDictionary *)route {
+    [self clearWaypoints];
+    for (NSArray *pair in route[@"points"]) {
+        if (![pair isKindOfClass:NSArray.class] || pair.count < 2) continue;
+        [self addWaypoint:CLLocationCoordinate2DMake([pair[0] doubleValue], [pair[1] doubleValue])];
+    }
+    if (self.waypointAnnotations.count) {
+        [self.mapView showAnnotations:self.waypointAnnotations animated:YES];
+    }
+    [self selectTab:SHTabRoute openSheet:YES];
+}
+
+- (void)saveRouteTapped {
+    if (self.waypoints.count == 0) { [self showMessage:SHText(@"need_stops")]; return; }
+    NSArray<NSValue *> *points = [self.waypoints copy];
+    [self askForNameWithTitle:SHText(@"route_name") initial:nil completion:^(NSString *name) {
+        [[SHPersistence shared] saveRouteNamed:name points:points];
+        [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    }];
+}
+
+- (void)copyCoordinatesTapped {
+    SHPersistence *store = [SHPersistence shared];
+    CLLocationCoordinate2D c;
+    if (store.isSpoofing) c = store.coordinate;
+    else if (self.hasSelection) c = self.selection;
+    else { [self showMessage:SHText(@"need_pin")]; return; }
+    UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%.6f, %.6f", c.latitude, c.longitude];
+    [[UINotificationFeedbackGenerator new] notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self showMessage:SHText(@"coords_copied")];
+}
+
+- (void)openSchedule {
+    [self.view endEditing:YES];
+    [self.navigationController pushViewController:[[SHScheduleViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];
+}
+
+- (void)shareExportFile {
+    NSString *json = [[SHPersistence shared] exportPlacesJSON];
+    NSURL *url = [[NSURL fileURLWithPath:NSTemporaryDirectory()] URLByAppendingPathComponent:@"Shabah-places.json"];
+    if (![json writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:nil]) {
+        [self showMessage:SHText(@"export_fail")];
+        return;
+    }
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
+    share.popoverPresentationController.sourceView = self.placesEditButton;
+    [self presentViewController:share animated:YES completion:nil];
+}
+
+- (void)pickImportFile {
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJSON, UTTypePlainText]];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    NSInteger count = [[SHPersistence shared] importPlacesJSON:text ?: @""];
+    if (count < 0) [self showMessage:SHText(@"import_fail")];
+    else [self showMessage:[NSString stringWithFormat:SHText(@"imported_fmt"), (long)count]];
+}
+
+- (void)refreshRealLocationPin {
+    SHPersistence *store = [SHPersistence shared];
+    CLLocation *real = store.lastRealLocation;
+    BOOL show = store.showRealLocation && store.isSpoofing && real != nil;
+    if (!show) {
+        if (self.realPin) [self.mapView removeAnnotation:self.realPin];
+        self.realPin = nil;
+        return;
+    }
+    if (!self.realPin) {
+        self.realPin = [SHRealLocationAnnotation new];
+        self.realPin.title = SHText(@"real_location_pin");
+        self.realPin.coordinate = real.coordinate;
+        [self.mapView addAnnotation:self.realPin];
+    } else {
+        self.realPin.coordinate = real.coordinate;
+    }
 }
 
 - (void)openPlace:(NSDictionary *)place {
@@ -1191,12 +1320,16 @@ static NSString *SHStyleTitle(NSInteger style) {
 #pragma mark - UITableView
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return tableView == self.placesTable ? 2 : 1;
+    return tableView == self.placesTable ? 3 : 1;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (tableView != self.placesTable) return nil;
-    return section == 0 ? SHText(@"bookmarks") : SHText(@"recents");
+    switch (section) {
+        case 0: return SHText(@"bookmarks");
+        case 1: return SHText(@"recents");
+        default: return SHText(@"saved_routes");
+    }
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -1217,10 +1350,17 @@ static NSString *SHStyleTitle(NSInteger style) {
     } else {
         NSArray *places = [self placesInSection:indexPath.section];
         if (places.count == 0) {
-            cell.textLabel.text = indexPath.section == 0 ? SHText(@"no_bookmarks") : SHText(@"no_recents");
+            NSArray *empty = @[@"no_bookmarks", @"no_recents", @"no_routes"];
+            cell.textLabel.text = SHText(empty[MIN(2, indexPath.section)]);
             cell.textLabel.textColor = UIColor.secondaryLabelColor;
             cell.textLabel.font = [UIFont systemFontOfSize:14];
+            cell.textLabel.numberOfLines = 0;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (indexPath.section == 2) {
+            NSDictionary *route = places[indexPath.row];
+            cell.textLabel.text = route[@"name"];
+            cell.detailTextLabel.text = [NSString stringWithFormat:SHText(@"stops_fmt"), (unsigned long)[route[@"points"] count]];
+            cell.imageView.image = [UIImage systemImageNamed:@"point.topleft.down.curvedto.point.bottomright.up"];
         } else {
             NSDictionary *place = places[indexPath.row];
             cell.textLabel.text = place[@"name"];
@@ -1243,7 +1383,9 @@ static NSString *SHStyleTitle(NSInteger style) {
         return;
     }
     NSArray *places = [self placesInSection:indexPath.section];
-    if (indexPath.row < (NSInteger)places.count) [self openPlace:places[indexPath.row]];
+    if (indexPath.row >= (NSInteger)places.count) return;
+    if (indexPath.section == 2) [self loadRoute:places[indexPath.row]];
+    else [self openPlace:places[indexPath.row]];
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1285,6 +1427,15 @@ static NSString *SHStyleTitle(NSInteger style) {
     if (indexPath.row >= (NSInteger)places.count) return nil;
     NSDictionary *place = places[indexPath.row];
     NSInteger row = indexPath.row;
+
+    if (indexPath.section == 2) {
+        UIContextualAction *delete = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:SHText(@"delete")
+            handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+                [[SHPersistence shared] removeRouteAtIndex:row];
+                done(YES);
+            }];
+        return [UISwipeActionsConfiguration configurationWithActions:@[delete]];
+    }
 
     if (indexPath.section == 0) {
         UIContextualAction *delete = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:SHText(@"delete")
@@ -1330,7 +1481,17 @@ static NSString *SHStyleTitle(NSInteger style) {
 
 - (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
     if ([annotation isKindOfClass:MKUserLocation.class]) return nil;
-    BOOL isStop = [annotation isKindOfClass:SHWaypointAnnotation.class];
+    if ([annotation isKindOfClass:SHRealLocationAnnotation.class]) {
+        MKMarkerAnnotationView *real = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:@"real"];
+        if (!real) real = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:@"real"];
+        real.annotation = annotation;
+        real.markerTintColor = UIColor.systemGrayColor;
+        real.glyphImage = [UIImage systemImageNamed:@"location.fill"];
+        real.displayPriority = MKFeatureDisplayPriorityRequired;
+        real.alpha = 0.75;
+        return real;
+    }
+    BOOL isStop =[annotation isKindOfClass:SHWaypointAnnotation.class];
     NSString *reuse = isStop ? @"stop" : @"pin";
     MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:reuse];
     if (!view) view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:reuse];

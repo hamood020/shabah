@@ -16,8 +16,30 @@ static UIColor *SHDynamic(UInt32 light, UInt32 dark) {
 
 @implementation SHTheme
 
-+ (UIColor *)accent     { return SHDynamic(0x534AB7, 0x8F87E6); }
-+ (UIColor *)accentSoft { return SHDynamic(0xEEEDFE, 0x2E2870); }
+// Accent palettes: { light, dark }. Index matches SHPersistence.themeIndex.
+static const UInt32 kAccents[][2] = {
+    { 0x534AB7, 0x8F87E6 },   // ghost purple
+    { 0x0F6E56, 0x3CC593 },   // teal
+    { 0x185FA5, 0x5A9EE8 },   // blue
+    { 0xC2462A, 0xF0896A },   // coral
+    { 0x2C2C2A, 0xD3D1C7 },   // graphite
+};
+static const NSInteger kAccentCount = sizeof(kAccents) / sizeof(kAccents[0]);
+
++ (NSInteger)themeCount { return kAccentCount; }
+
++ (UIColor *)accentForTheme:(NSInteger)index {
+    NSInteger i = (index >= 0 && index < kAccentCount) ? index : 0;
+    return SHDynamic(kAccents[i][0], kAccents[i][1]);
+}
+
++ (NSString *)themeNameAtIndex:(NSInteger)index {
+    NSArray *keys = @[@"theme_purple", @"theme_teal", @"theme_blue", @"theme_coral", @"theme_graphite"];
+    return SHText(keys[(index >= 0 && index < kAccentCount) ? index : 0]);
+}
+
++ (UIColor *)accent     { return [self accentForTheme:[SHPersistence shared].themeIndex]; }
++ (UIColor *)accentSoft { return [[self accent] colorWithAlphaComponent:0.14]; }
 + (UIColor *)success    { return SHDynamic(0x1D9E75, 0x3CC593); }
 + (UIColor *)warning    { return SHDynamic(0xBA7517, 0xEF9F27); }
 

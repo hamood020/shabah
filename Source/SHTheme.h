@@ -14,6 +14,9 @@ typedef NS_ENUM(NSInteger, SHButtonStyle) {
 
 + (UIColor *)accent;
 + (UIColor *)accentSoft;
++ (NSInteger)themeCount;
++ (UIColor *)accentForTheme:(NSInteger)index;
++ (NSString *)themeNameAtIndex:(NSInteger)index;
 + (UIColor *)success;
 + (UIColor *)warning;
 
