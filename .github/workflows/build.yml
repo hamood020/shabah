@@ -8,11 +8,11 @@ on:
 jobs:
   build:
     # Linux runners are always available; macOS runners can queue for a long time.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       THEOS: ${{ github.workspace }}/theos
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -41,7 +41,7 @@ jobs:
           cp "$SRC" out/
           ls -la out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Shabah-dylib
           path: out/Shabah.dylib
